@@ -84,12 +84,20 @@ const btnReset = document.getElementById('btn-reset');
 const btnMute = document.getElementById('btn-mute');
 const btnTestSound = document.getElementById('btn-test-sound');
 
+const btnToggleSettings = document.getElementById('btn-toggle-settings');
+const settingsPanel = document.getElementById('settings-panel');
+const settingsSummary = document.getElementById('settings-summary');
+
 const CIRCUMFERENCE = 2 * Math.PI * 45;
 
 btnMute.addEventListener('click', () => {
     isMuted = !isMuted;
     btnMute.classList.toggle('muted', isMuted);
     btnMute.textContent = isMuted ? '🔇' : '🔊';
+});
+
+btnToggleSettings.addEventListener('click', () => {
+    settingsPanel.classList.toggle('collapsed');
 });
 
 btnTestSound.addEventListener('click', () => {
@@ -280,6 +288,13 @@ function saveSettings() {
         soundTheme: document.getElementById('sound-theme-select').value
     };
     localStorage.setItem('intervalTimerProSettings', JSON.stringify(settings));
+    
+    // Update summary string
+    const wM = int1MinInput.value;
+    const wS = int1SecInput.value.padStart(2, '0');
+    const rM = int2MinInput.value;
+    const rS = int2SecInput.value.padStart(2, '0');
+    settingsSummary.textContent = `W ${wM}:${wS} | R ${rM}:${rS} (${settings.totalSets} SETS)`;
 }
 
 function loadSettings() {
@@ -295,9 +310,19 @@ function loadSettings() {
             if (settings.int2Sec) int2SecInput.value = settings.int2Sec;
             if (settings.totalSets) document.getElementById('total-sets').value = settings.totalSets;
             if (settings.soundTheme) document.getElementById('sound-theme-select').value = settings.soundTheme;
+            
+            // Initial summary update
+            const wM = int1MinInput.value;
+            const wS = int1SecInput.value.padStart(2, '0');
+            const rM = int2MinInput.value;
+            const rS = int2SecInput.value.padStart(2, '0');
+            settingsSummary.textContent = `W ${wM}:${wS} | R ${rM}:${rS} (${document.getElementById('total-sets').value} SETS)`;
         } catch (e) {
             console.error("Failed to load settings", e);
         }
+    } else {
+        // Init summary if no settings
+        settingsSummary.textContent = `W 10:00 | R 1:00 (10 SETS)`;
     }
 }
 
