@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Interval Timer Pro</title>
+    <link rel="stylesheet" href="fonts.css">
+    <link rel="stylesheet" href="style.css">
+    <link rel="manifest" href="manifest.json">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1 class="app-title">PRO INTERVAL TIMER</h1>
+            <button id="btn-mute" class="mute-btn">🔊</button>
+        </header>
+        
+        <main class="main-content">
+            <section class="timer-section">
+                <div class="timer-wrapper">
+                    <svg class="progress-ring" viewBox="0 0 100 100">
+                        <circle class="progress-ring__bg" cx="50" cy="50" r="45"></circle>
+                        <circle class="progress-ring__circle" cx="50" cy="50" r="45"></circle>
+                    </svg>
+                    <div class="timer-text-container">
+                        <div id="set-counter" class="set-text">SET 1 / 10</div>
+                        <div id="current-phase-display" class="phase-text">READY</div>
+                        <div id="time-left" class="time-text">00:00</div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="settings-section">
+                <!-- Interval 1 -->
+                <div class="interval-card int1-card">
+                    <div class="card-header">
+                        <input type="text" id="int1-name" class="name-input" value="WORK">
+                        <span class="edit-icon">✎</span>
+                    </div>
+                    <div class="time-controls">
+                        <div class="control-col">
+                            <button class="up-btn" onclick="adjustTime('int1-min', 1)">▲</button>
+                            <input type="number" id="int1-min" value="10" readonly>
+                            <button class="down-btn" onclick="adjustTime('int1-min', -1)">▼</button>
+                        </div>
+                        <div class="colon">:</div>
+                        <div class="control-col">
+                            <button class="up-btn" onclick="adjustTime('int1-sec', 1)">▲</button>
+                            <input type="number" id="int1-sec" value="0" readonly>
+                            <button class="down-btn" onclick="adjustTime('int1-sec', -1)">▼</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Interval 2 -->
+                <div class="interval-card int2-card">
+                    <div class="card-header">
+                        <input type="text" id="int2-name" class="name-input" value="REST">
+                        <span class="edit-icon">✎</span>
+                    </div>
+                    <div class="time-controls">
+                        <div class="control-col">
+                            <button class="up-btn" onclick="adjustTime('int2-min', 1)">▲</button>
+                            <input type="number" id="int2-min" value="1" readonly>
+                            <button class="down-btn" onclick="adjustTime('int2-min', -1)">▼</button>
+                        </div>
+                        <div class="colon">:</div>
+                        <div class="control-col">
+                            <button class="up-btn" onclick="adjustTime('int2-sec', 1)">▲</button>
+                            <input type="number" id="int2-sec" value="0" readonly>
+                            <button class="down-btn" onclick="adjustTime('int2-sec', -1)">▼</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Sets -->
+                <div class="interval-card sets-card">
+                    <div class="card-header">
+                        <div class="name-input">SETS</div>
+                    </div>
+                    <div class="time-controls">
+                        <div class="control-col">
+                            <button class="up-btn" onclick="adjustTime('total-sets', 1)">▲</button>
+                            <input type="number" id="total-sets" value="10" readonly>
+                            <button class="down-btn" onclick="adjustTime('total-sets', -1)">▼</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Sound Theme -->
+                <div class="interval-card sound-card">
+                    <div class="card-header">
+                        <div class="name-input">SOUND THEME</div>
+                    </div>
+                    <div class="time-controls" style="flex-direction: column; gap: 10px;">
+                        <select id="sound-theme-select" class="theme-select">
+                            <option value="classic">1: Classic Beep</option>
+                            <option value="bell">2: Soft Bell</option>
+                            <option value="retro">3: Retro 8-bit</option>
+                            <option value="synth">4: Heavy Synth</option>
+                            <option value="cyber">5: Cyberpunk</option>
+                        </select>
+                        <button id="btn-test-sound" class="btn-test-sound">TEST BEEP</button>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="action-footer">
+            <button id="btn-start" class="action-btn btn-start">START</button>
+            <button id="btn-pause" class="action-btn btn-pause hidden">PAUSE</button>
+            <button id="btn-reset" class="action-btn btn-reset">RESET</button>
+        </footer>
+        
+        <div class="ad-space">
+            <p>ADVERTISEMENT SPACE (320x50)</p>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,207 @@
+:root {
+    --bg-color: #0f172a;
+    --panel-bg: #1e293b;
+    --text-primary: #f8fafc;
+    --text-secondary: #94a3b8;
+    --accent-work: #3b82f6;
+    --accent-rest: #10b981;
+    --accent-danger: #ef4444;
+}
+
+body, html {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    font-family: 'Inter', sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.container {
+    background-color: var(--panel-bg);
+    padding: 40px;
+    border-radius: 24px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+    width: 100%;
+    max-width: 400px;
+    text-align: center;
+}
+
+.app-title {
+    font-weight: 800;
+    font-size: 24px;
+    letter-spacing: 2px;
+    margin-top: 0;
+    margin-bottom: 30px;
+    color: var(--text-secondary);
+}
+
+.timer-display {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 50%;
+    width: 250px;
+    height: 250px;
+    margin: 0 auto 30px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    border: 8px solid var(--text-secondary);
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.timer-display.work-phase {
+    border-color: var(--accent-work);
+    box-shadow: 0 0 30px rgba(59, 130, 246, 0.4);
+}
+
+.timer-display.rest-phase {
+    border-color: var(--accent-rest);
+    box-shadow: 0 0 30px rgba(16, 185, 129, 0.4);
+}
+
+.current-phase {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: var(--text-secondary);
+    margin-bottom: 5px;
+    transition: color 0.3s ease;
+}
+
+.work-phase .current-phase { color: var(--accent-work); }
+.rest-phase .current-phase { color: var(--accent-rest); }
+
+.time-left {
+    font-family: 'Roboto Mono', monospace;
+    font-size: 64px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.settings-panel {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    margin-bottom: 30px;
+}
+
+.input-group {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    flex: 1;
+}
+
+.input-group label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+}
+
+.time-inputs {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.2);
+    padding: 8px;
+    border-radius: 8px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.number-control {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.ctrl-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 10px;
+    cursor: pointer;
+    padding: 2px 8px;
+    transition: color 0.2s, transform 0.1s;
+}
+
+.ctrl-btn:hover {
+    color: var(--text-primary);
+}
+
+.ctrl-btn:active {
+    transform: scale(0.9);
+}
+
+.ctrl-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.time-inputs input {
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font-family: 'Roboto Mono', monospace;
+    font-size: 20px;
+    font-weight: 700;
+    width: 32px;
+    text-align: center;
+    outline: none;
+    padding: 0;
+    margin: 4px 0;
+}
+
+.time-inputs input::-webkit-outer-spin-button,
+.time-inputs input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.time-inputs span {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin-left: 4px;
+    margin-right: 12px;
+}
+
+.time-inputs span:last-child {
+    margin-right: 0;
+}
+
+.controls {
+    display: flex;
+    gap: 15px;
+}
+
+.btn {
+    flex: 1;
+    padding: 16px 0;
+    border: none;
+    border-radius: 12px;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: transform 0.1s, opacity 0.2s;
+    color: white;
+}
+
+.btn:active {
+    transform: scale(0.95);
+}
+
+.btn-primary { background-color: var(--accent-work); }
+.btn-secondary { background-color: #f59e0b; }
+.btn-danger { background-color: var(--accent-danger); }
+
+.hidden {
+    display: none !important;
+}

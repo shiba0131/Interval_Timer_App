@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interval Timer</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Roboto+Mono:wght@500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <h1 class="app-title">INTERVAL TIMER</h1>
+        
+        <div class="timer-display" id="timer-display">
+            <div class="current-phase" id="current-phase">READY</div>
+            <div class="time-left" id="time-left">00:00</div>
+        </div>
+
+        <div class="settings-panel">
+            <div class="input-group">
+                <label>Interval 1</label>
+                <div class="time-inputs">
+                    <div class="number-control">
+                        <button class="ctrl-btn up-btn" onclick="adjustTime('int1-min', 1)">▲</button>
+                        <input type="number" id="int1-min" min="0" max="99" value="10" readonly>
+                        <button class="ctrl-btn down-btn" onclick="adjustTime('int1-min', -1)">▼</button>
+                    </div>
+                    <span>m</span>
+                    <div class="number-control">
+                        <button class="ctrl-btn up-btn" onclick="adjustTime('int1-sec', 1)">▲</button>
+                        <input type="number" id="int1-sec" min="0" max="59" value="0" readonly>
+                        <button class="ctrl-btn down-btn" onclick="adjustTime('int1-sec', -1)">▼</button>
+                    </div>
+                    <span>s</span>
+                </div>
+            </div>
+            
+            <div class="input-group">
+                <label>Interval 2</label>
+                <div class="time-inputs">
+                    <div class="number-control">
+                        <button class="ctrl-btn up-btn" onclick="adjustTime('int2-min', 1)">▲</button>
+                        <input type="number" id="int2-min" min="0" max="99" value="1" readonly>
+                        <button class="ctrl-btn down-btn" onclick="adjustTime('int2-min', -1)">▼</button>
+                    </div>
+                    <span>m</span>
+                    <div class="number-control">
+                        <button class="ctrl-btn up-btn" onclick="adjustTime('int2-sec', 1)">▲</button>
+                        <input type="number" id="int2-sec" min="0" max="59" value="0" readonly>
+                        <button class="ctrl-btn down-btn" onclick="adjustTime('int2-sec', -1)">▼</button>
+                    </div>
+                    <span>s</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button id="btn-start" class="btn btn-primary">START</button>
+            <button id="btn-pause" class="btn btn-secondary hidden">PAUSE</button>
+            <button id="btn-reset" class="btn btn-danger">RESET</button>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
