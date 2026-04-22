@@ -1,13 +1,39 @@
 import json
+import os
 import sqlite3
+import threading
+import tempfile
 import time
-from datetime import datetime
+from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
 
 # --- データベース初期化 ---
-DB_NAME = "pinpon.db"
+LEGACY_DB_NAME = "pinpon.db"
+SQLITE_TIMEOUT_SECONDS = 10
+SQLITE_BUSY_TIMEOUT_MS = 10000
+DB_LOCK_RETRY_COUNT = 4
+DB_LOCK_RETRY_DELAY_SECONDS = 0.25
+AUTO_BACKUP_RETENTION_DAYS = 7
+FORM_DRAFT_KEY_NEW = "new_match_form"
+MAX_GAME_COUNT = 7
+FORM_DRAFT_FIELDS = [
+    "date",
+    "tour",
+    "opp",
+    "team",
+    "style",
+    "hand",
+    "grip",
+    "fore",
+    "back",
+    "game_count",
+    "allow_incomplete",
+    "tags",
+    "reason",
+    "opp_reuse",
+]
 TAG_OPTIONS = [
     "サーブミス",
     "レシーブミス",
@@ -23,85 +49,319 @@ TAG_OPTIONS = [
 ]
 
 
+def resolve_db_path():
+    env_db_path = os.getenv("PINPON_DB_PATH")
+    if env_db_path:
+        db_path = os.path.abspath(os.path.expanduser(env_db_path))
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        return db_path
+
+    legacy_db_path = os.path.abspath(LEGACY_DB_NAME)
+    if os.path.exists(legacy_db_path):
+        return legacy_db_path
+
+    data_dir = os.getenv("PINPON_DATA_DIR")
+    if data_dir:
+        base_dir = os.path.abspath(os.path.expanduser(data_dir))
+    else:
+        base_dir = os.path.join(os.path.expanduser("~"), ".pinpon-record")
+
+    os.makedirs(base_dir, exist_ok=True)
+    return os.path.join(base_dir, LEGACY_DB_NAME)
+
+
+DB_NAME = resolve_db_path()
+
+
+def resolve_backup_dir():
+    env_backup_dir = os.getenv("PINPON_BACKUP_DIR")
+    if env_backup_dir:
+        return os.path.abspath(os.path.expanduser(env_backup_dir))
+
+    documents_dir = os.path.join(os.path.expanduser("~"), "Documents")
+    if not os.path.isdir(documents_dir):
+        documents_dir = os.path.expanduser("~")
+
+    return os.path.join(documents_dir, "pinpon-record")
+
+
+AUTO_BACKUP_DIR = resolve_backup_dir()
+
+
+@st.cache_resource
+def get_db_write_lock():
+    return threading.Lock()
+
+
 def get_connection():
-    return sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=SQLITE_TIMEOUT_SECONDS)
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")
+    return conn
+
+
+def is_database_locked_error(error):
+    return "database is locked" in str(error).lower()
+
+
+def format_database_error(error, action_label):
+    if isinstance(error, sqlite3.OperationalError) and is_database_locked_error(error):
+        return f"{action_label}中にデータベースが混み合っています。少し待ってから再試行してください。"
+    return f"{action_label}中にエラーが発生しました: {error}"
+
+
+def run_write_transaction(write_operation):
+    last_error = None
+    for attempt in range(DB_LOCK_RETRY_COUNT):
+        conn = None
+        try:
+            with get_db_write_lock():
+                conn = get_connection()
+                result = write_operation(conn)
+                conn.commit()
+                return result
+        except sqlite3.OperationalError as error:
+            last_error = error
+            if conn is not None:
+                conn.rollback()
+            if is_database_locked_error(error) and attempt < DB_LOCK_RETRY_COUNT - 1:
+                time.sleep(DB_LOCK_RETRY_DELAY_SECONDS * (attempt + 1))
+                continue
+            raise
+        except Exception:
+            if conn is not None:
+                conn.rollback()
+            raise
+        finally:
+            if conn is not None:
+                conn.close()
+
+    if last_error is not None:
+        raise last_error
+
+
+def serialize_date_value(value):
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def parse_date_value(value, fallback=None):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return fallback
+    return fallback
+
+
+def get_form_draft_key(prefix, is_edit):
+    if is_edit:
+        return None
+    if prefix == "new_":
+        return FORM_DRAFT_KEY_NEW
+    return None
+
+
+def load_form_draft(prefix, is_edit=False):
+    draft_key = get_form_draft_key(prefix, is_edit)
+    if not draft_key:
+        return {}
+
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT payload FROM form_drafts WHERE draft_key=?", (draft_key,))
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return {}
+
+    try:
+        payload = json.loads(row[0])
+    except json.JSONDecodeError:
+        return {}
+
+    restored_state = {}
+    fallback_date = datetime.today().date()
+    for field_name in FORM_DRAFT_FIELDS:
+        if field_name not in payload:
+            continue
+        value = payload[field_name]
+        if field_name == "date":
+            value = parse_date_value(value, fallback=fallback_date)
+        restored_state[prefix + field_name] = value
+
+    for i in range(1, MAX_GAME_COUNT + 1):
+        my_key = f"my_{i}"
+        opp_key = f"opp_{i}"
+        if my_key in payload:
+            restored_state[prefix + my_key] = int(payload[my_key])
+        if opp_key in payload:
+            restored_state[prefix + opp_key] = int(payload[opp_key])
+
+    if prefix + "opp_reuse" in restored_state:
+        restored_state[prefix + "opp_reuse_applied"] = restored_state[prefix + "opp_reuse"]
+
+    return restored_state
+
+
+def persist_form_draft(prefix, is_edit=False):
+    draft_key = get_form_draft_key(prefix, is_edit)
+    if not draft_key:
+        return
+
+    payload = {}
+    for field_name in FORM_DRAFT_FIELDS:
+        state_key = prefix + field_name
+        value = st.session_state.get(state_key)
+        if field_name == "date":
+            value = serialize_date_value(value)
+        elif field_name == "game_count":
+            value = int(value or 5)
+        elif field_name == "tags":
+            value = list(value or [])
+        payload[field_name] = value
+
+    for i in range(1, MAX_GAME_COUNT + 1):
+        payload[f"my_{i}"] = int(st.session_state.get(f"{prefix}my_{i}", 0) or 0)
+        payload[f"opp_{i}"] = int(st.session_state.get(f"{prefix}opp_{i}", 0) or 0)
+
+    def write_operation(conn):
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT OR REPLACE INTO form_drafts (draft_key, payload, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (
+                draft_key,
+                json.dumps(payload, ensure_ascii=False),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+
+    run_write_transaction(write_operation)
+
+
+def clear_form_draft(prefix, is_edit=False):
+    draft_key = get_form_draft_key(prefix, is_edit)
+    if not draft_key:
+        return
+
+    def write_operation(conn):
+        c = conn.cursor()
+        c.execute("DELETE FROM form_drafts WHERE draft_key=?", (draft_key,))
+
+    run_write_transaction(write_operation)
+
+
+def clear_form_state(prefix):
+    for field_name in FORM_DRAFT_FIELDS:
+        state_key = prefix + field_name
+        if state_key in st.session_state:
+            del st.session_state[state_key]
+
+    applied_key = prefix + "opp_reuse_applied"
+    if applied_key in st.session_state:
+        del st.session_state[applied_key]
+
+    for i in range(1, MAX_GAME_COUNT + 1):
+        for score_prefix in ("my_", "opp_"):
+            score_key = f"{prefix}{score_prefix}{i}"
+            if score_key in st.session_state:
+                del st.session_state[score_key]
 
 
 def init_db():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute(
-        '''
-        CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            match_date TEXT,
-            tournament_name TEXT,
-            opponent_name TEXT,
-            opponent_team TEXT,
-            play_style TEXT,
-            fore_rubber TEXT,
-            back_rubber TEXT,
-            dominant_hand TEXT,
-            racket_grip TEXT,
-            game_count INTEGER,
-            my_set_count INTEGER,
-            opp_set_count INTEGER,
-            scores TEXT,
-            win_loss_reason TEXT,
-            issue_tags TEXT,
-            created_at TEXT
-        )
-        '''
-    )
-    c.execute(
-        '''
-        CREATE TABLE IF NOT EXISTS tag_definitions (
-            tag_name TEXT PRIMARY KEY,
-            is_hidden INTEGER DEFAULT 0,
-            sort_order INTEGER,
-            created_at TEXT
-        )
-        '''
-    )
-
-    alter_statements = [
-        "ALTER TABLE matches ADD COLUMN opponent_team TEXT",
-        "ALTER TABLE matches ADD COLUMN fore_rubber TEXT",
-        "ALTER TABLE matches ADD COLUMN back_rubber TEXT",
-        "ALTER TABLE matches ADD COLUMN racket_grip TEXT",
-        "ALTER TABLE matches ADD COLUMN game_count INTEGER",
-    ]
-    for statement in alter_statements:
-        try:
-            c.execute(statement)
-        except sqlite3.OperationalError:
-            pass
-
-    c.execute("UPDATE matches SET racket_grip = 'シェーク' WHERE racket_grip IS NULL OR racket_grip = ''")
-
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    tag_count = c.execute("SELECT COUNT(*) FROM tag_definitions").fetchone()[0]
-    if tag_count == 0:
-        for index, tag_name in enumerate(TAG_OPTIONS):
-            c.execute(
-                "INSERT INTO tag_definitions (tag_name, is_hidden, sort_order, created_at) VALUES (?, 0, ?, ?)",
-                (tag_name, index, now_text),
+    def write_operation(conn):
+        c = conn.cursor()
+        c.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                match_date TEXT,
+                tournament_name TEXT,
+                opponent_name TEXT,
+                opponent_team TEXT,
+                play_style TEXT,
+                fore_rubber TEXT,
+                back_rubber TEXT,
+                dominant_hand TEXT,
+                racket_grip TEXT,
+                game_count INTEGER,
+                my_set_count INTEGER,
+                opp_set_count INTEGER,
+                scores TEXT,
+                win_loss_reason TEXT,
+                issue_tags TEXT,
+                created_at TEXT
             )
+            '''
+        )
+        c.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS tag_definitions (
+                tag_name TEXT PRIMARY KEY,
+                is_hidden INTEGER DEFAULT 0,
+                sort_order INTEGER,
+                created_at TEXT
+            )
+            '''
+        )
+        c.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS form_drafts (
+                draft_key TEXT PRIMARY KEY,
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            '''
+        )
 
-    existing_tags = {row[0] for row in c.execute("SELECT tag_name FROM tag_definitions").fetchall()}
-    next_sort = c.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tag_definitions").fetchone()[0]
-    for (raw_tags,) in c.execute("SELECT issue_tags FROM matches").fetchall():
-        for tag in parse_json_list(raw_tags):
-            if tag not in existing_tags:
+        alter_statements = [
+            "ALTER TABLE matches ADD COLUMN opponent_team TEXT",
+            "ALTER TABLE matches ADD COLUMN fore_rubber TEXT",
+            "ALTER TABLE matches ADD COLUMN back_rubber TEXT",
+            "ALTER TABLE matches ADD COLUMN racket_grip TEXT",
+            "ALTER TABLE matches ADD COLUMN game_count INTEGER",
+        ]
+        for statement in alter_statements:
+            try:
+                c.execute(statement)
+            except sqlite3.OperationalError:
+                pass
+
+        c.execute("UPDATE matches SET racket_grip = 'シェーク' WHERE racket_grip IS NULL OR racket_grip = ''")
+
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tag_count = c.execute("SELECT COUNT(*) FROM tag_definitions").fetchone()[0]
+        if tag_count == 0:
+            for index, tag_name in enumerate(TAG_OPTIONS):
                 c.execute(
                     "INSERT INTO tag_definitions (tag_name, is_hidden, sort_order, created_at) VALUES (?, 0, ?, ?)",
-                    (tag, next_sort, now_text),
+                    (tag_name, index, now_text),
                 )
-                existing_tags.add(tag)
-                next_sort += 1
 
-    conn.commit()
-    conn.close()
+        existing_tags = {row[0] for row in c.execute("SELECT tag_name FROM tag_definitions").fetchall()}
+        next_sort = c.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tag_definitions").fetchone()[0]
+        for (raw_tags,) in c.execute("SELECT issue_tags FROM matches").fetchall():
+            for tag in parse_json_list(raw_tags):
+                if tag not in existing_tags:
+                    c.execute(
+                        "INSERT INTO tag_definitions (tag_name, is_hidden, sort_order, created_at) VALUES (?, 0, ?, ?)",
+                        (tag, next_sort, now_text),
+                    )
+                    existing_tags.add(tag)
+                    next_sort += 1
+
+    run_write_transaction(write_operation)
 
 # --- スコアからセット数を計算する関数 ---
 def calculate_set_count(scores):
@@ -122,8 +382,9 @@ def calculate_set_count(scores):
 
 
 # --- スコアのバリデーション関数 ---
-def validate_scores(scores, game_count):
+def validate_scores(scores, game_count, allow_incomplete=False):
     errors = []
+    warnings = []
     my_sets, opp_sets = calculate_set_count(scores)
     winning_sets_needed = (game_count // 2) + 1
     played_games = 0
@@ -133,7 +394,11 @@ def validate_scores(scores, game_count):
             continue
         played_games += 1
         if max(my_s, opp_s) < 11:
-            errors.append(f"第{game_num}ゲーム: どちらかが11点以上に達している必要があります。")
+            message = f"第{game_num}ゲーム: 途中終了のスコアとして扱います。通常の試合結果としては未決着です。"
+            if allow_incomplete:
+                warnings.append(message)
+            else:
+                errors.append(f"第{game_num}ゲーム: どちらかが11点以上に達している必要があります。")
         elif max(my_s, opp_s) == 11:
             if min(my_s, opp_s) >= 10:
                 errors.append(f"第{game_num}ゲーム: 10-10以降は2点差をつける必要があります。")
@@ -142,10 +407,18 @@ def validate_scores(scores, game_count):
                 errors.append(f"第{game_num}ゲーム: 11点以降の決着は必ず2点差になります（例: 12-10, 14-12）。")
     if len(errors) == 0:
         if my_sets < winning_sets_needed and opp_sets < winning_sets_needed:
-            errors.append("勝敗がつくまでスコアが入力されていません。")
+            message = "勝敗がつく前のスコアです。棄権や途中終了の記録として保存します。"
+            if allow_incomplete:
+                warnings.append(message)
+            else:
+                errors.append("勝敗がつくまでスコアが入力されていません。")
         elif played_games > (my_sets + opp_sets):
-            errors.append("勝敗が決まった後の不要なゲームスコアが入力されています。")
-    return errors
+            message = "勝敗決定後の追加ゲームが入力されています。練習試合や参考スコアとして保存します。"
+            if allow_incomplete:
+                warnings.append(message)
+            else:
+                errors.append("勝敗が決まった後の不要なゲームスコアが入力されています。")
+    return errors, warnings
 
 
 # --- 共通処理 ---
@@ -194,21 +467,20 @@ def add_tag_definition(tag_name):
     if not normalized:
         return False, "タグ名を入力してください。"
 
-    conn = get_connection()
-    c = conn.cursor()
-    exists = c.execute("SELECT 1 FROM tag_definitions WHERE tag_name = ?", (normalized,)).fetchone()
-    if exists:
-        conn.close()
-        return False, "同じタグ名がすでに存在します。"
+    def write_operation(conn):
+        c = conn.cursor()
+        exists = c.execute("SELECT 1 FROM tag_definitions WHERE tag_name = ?", (normalized,)).fetchone()
+        if exists:
+            return False, "同じタグ名がすでに存在します。"
 
-    next_sort = c.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tag_definitions").fetchone()[0]
-    c.execute(
-        "INSERT INTO tag_definitions (tag_name, is_hidden, sort_order, created_at) VALUES (?, 0, ?, ?)",
-        (normalized, next_sort, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-    )
-    conn.commit()
-    conn.close()
-    return True, f"タグ「{normalized}」を追加しました。"
+        next_sort = c.execute("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tag_definitions").fetchone()[0]
+        c.execute(
+            "INSERT INTO tag_definitions (tag_name, is_hidden, sort_order, created_at) VALUES (?, 0, ?, ?)",
+            (normalized, next_sort, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        return True, f"タグ「{normalized}」を追加しました。"
+
+    return run_write_transaction(write_operation)
 
 
 def rename_tag_definition(old_name, new_name):
@@ -219,39 +491,37 @@ def rename_tag_definition(old_name, new_name):
     if old_name == new_name:
         return False, "変更前と変更後が同じです。"
 
-    conn = get_connection()
-    c = conn.cursor()
-    if not c.execute("SELECT 1 FROM tag_definitions WHERE tag_name = ?", (old_name,)).fetchone():
-        conn.close()
-        return False, "変更対象のタグが見つかりません。"
-    if c.execute("SELECT 1 FROM tag_definitions WHERE tag_name = ?", (new_name,)).fetchone():
-        conn.close()
-        return False, "変更後のタグ名はすでに存在します。"
+    def write_operation(conn):
+        c = conn.cursor()
+        if not c.execute("SELECT 1 FROM tag_definitions WHERE tag_name = ?", (old_name,)).fetchone():
+            return False, "変更対象のタグが見つかりません。"
+        if c.execute("SELECT 1 FROM tag_definitions WHERE tag_name = ?", (new_name,)).fetchone():
+            return False, "変更後のタグ名はすでに存在します。"
 
-    c.execute("UPDATE tag_definitions SET tag_name = ? WHERE tag_name = ?", (new_name, old_name))
-    rows = c.execute("SELECT id, issue_tags FROM matches WHERE issue_tags IS NOT NULL AND issue_tags != ''").fetchall()
-    for row_id, raw_tags in rows:
-        tags = parse_json_list(raw_tags)
-        if old_name in tags:
-            updated_tags = [new_name if tag == old_name else tag for tag in tags]
-            c.execute("UPDATE matches SET issue_tags = ? WHERE id = ?", (json.dumps(updated_tags, ensure_ascii=False), row_id))
+        c.execute("UPDATE tag_definitions SET tag_name = ? WHERE tag_name = ?", (new_name, old_name))
+        rows = c.execute("SELECT id, issue_tags FROM matches WHERE issue_tags IS NOT NULL AND issue_tags != ''").fetchall()
+        for row_id, raw_tags in rows:
+            tags = parse_json_list(raw_tags)
+            if old_name in tags:
+                updated_tags = [new_name if tag == old_name else tag for tag in tags]
+                c.execute("UPDATE matches SET issue_tags = ? WHERE id = ?", (json.dumps(updated_tags, ensure_ascii=False), row_id))
 
-    conn.commit()
-    conn.close()
-    return True, f"タグ名を「{new_name}」へ変更しました。"
+        return True, f"タグ名を「{new_name}」へ変更しました。"
+
+    return run_write_transaction(write_operation)
 
 
 def set_tag_hidden(tag_name, is_hidden):
-    conn = get_connection()
-    c = conn.cursor()
-    if not c.execute("SELECT 1 FROM tag_definitions WHERE tag_name = ?", (tag_name,)).fetchone():
-        conn.close()
-        return False, "対象タグが見つかりません。"
-    c.execute("UPDATE tag_definitions SET is_hidden = ? WHERE tag_name = ?", (1 if is_hidden else 0, tag_name))
-    conn.commit()
-    conn.close()
     action = "非表示" if is_hidden else "再表示"
-    return True, f"タグ「{tag_name}」を{action}にしました。"
+
+    def write_operation(conn):
+        c = conn.cursor()
+        if not c.execute("SELECT 1 FROM tag_definitions WHERE tag_name = ?", (tag_name,)).fetchone():
+            return False, "対象タグが見つかりません。"
+        c.execute("UPDATE tag_definitions SET is_hidden = ? WHERE tag_name = ?", (1 if is_hidden else 0, tag_name))
+        return True, f"タグ「{tag_name}」を{action}にしました。"
+
+    return run_write_transaction(write_operation)
 
 
 def enrich_matches_dataframe(df):
@@ -289,7 +559,7 @@ def enrich_matches_dataframe(df):
 
 
 def load_matches_dataframe(order_by="id DESC"):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_connection()
     df = pd.read_sql_query(f"SELECT * FROM matches ORDER BY {order_by}", conn)
     conn.close()
     return enrich_matches_dataframe(df)
@@ -343,16 +613,122 @@ def build_csv_bytes(df):
     return build_export_dataframe(df).to_csv(index=False).encode("utf-8-sig")
 
 
+def build_auto_backup_filename(target_dt=None):
+    target_dt = target_dt or datetime.now()
+    return f"backup_{target_dt.strftime('%Y%m%d')}.db"
+
+
+def build_db_backup_filename():
+    return f"pinpon-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+
+
+def list_auto_backup_paths():
+    if not os.path.isdir(AUTO_BACKUP_DIR):
+        return []
+
+    backup_paths = []
+    for name in os.listdir(AUTO_BACKUP_DIR):
+        if not (name.startswith("backup_") and name.endswith(".db")):
+            continue
+
+        date_token = name[len("backup_") : -len(".db")]
+        try:
+            backup_date = datetime.strptime(date_token, "%Y%m%d")
+        except ValueError:
+            continue
+
+        backup_paths.append((backup_date, os.path.join(AUTO_BACKUP_DIR, name)))
+
+    backup_paths.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in backup_paths]
+
+
+def write_db_snapshot_to_path(target_path):
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+    temp_path = None
+    source_conn = None
+    backup_conn = None
+    with get_db_write_lock():
+        try:
+            fd, temp_path = tempfile.mkstemp(prefix="pinpon-auto-", suffix=".db", dir=os.path.dirname(target_path))
+            os.close(fd)
+
+            source_conn = get_connection()
+            backup_conn = sqlite3.connect(temp_path)
+            source_conn.backup(backup_conn)
+            backup_conn.close()
+            backup_conn = None
+            source_conn.close()
+            source_conn = None
+
+            os.replace(temp_path, target_path)
+            temp_path = None
+            return target_path
+        finally:
+            if backup_conn is not None:
+                backup_conn.close()
+            if source_conn is not None:
+                source_conn.close()
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+
+
+def prune_auto_backups(retention_days=AUTO_BACKUP_RETENTION_DAYS):
+    removed_paths = []
+    for obsolete_path in list_auto_backup_paths()[retention_days:]:
+        if os.path.exists(obsolete_path):
+            os.remove(obsolete_path)
+            removed_paths.append(obsolete_path)
+    return removed_paths
+
+
+def create_auto_backup():
+    target_path = os.path.join(AUTO_BACKUP_DIR, build_auto_backup_filename())
+    write_db_snapshot_to_path(target_path)
+    removed_paths = prune_auto_backups()
+    return target_path, removed_paths
+
+
+def build_db_backup_bytes():
+    temp_path = None
+    source_conn = None
+    backup_conn = None
+    with get_db_write_lock():
+        try:
+            fd, temp_path = tempfile.mkstemp(suffix=".db")
+            os.close(fd)
+
+            source_conn = get_connection()
+            backup_conn = sqlite3.connect(temp_path)
+            source_conn.backup(backup_conn)
+            backup_conn.close()
+            backup_conn = None
+            source_conn.close()
+            source_conn = None
+
+            with open(temp_path, "rb") as backup_file:
+                return backup_file.read()
+        finally:
+            if backup_conn is not None:
+                backup_conn.close()
+            if source_conn is not None:
+                source_conn.close()
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+
+
 def reset_matches_table():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("DELETE FROM matches")
-    conn.commit()
-    conn.close()
+    def write_operation(conn):
+        c = conn.cursor()
+        c.execute("DELETE FROM matches")
+        c.execute("DELETE FROM form_drafts")
+
+    run_write_transaction(write_operation)
 
 
 def load_opponent_profiles():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_connection()
     query = """
         SELECT opponent_name, opponent_team, play_style, dominant_hand, racket_grip, fore_rubber, back_rubber
         FROM matches
@@ -383,14 +759,14 @@ def load_opponent_profiles():
 def render_match_form(default_data=None):
     is_edit = default_data is not None
 
-    def_date = datetime.strptime(default_data["match_date"], "%Y-%m-%d").date() if is_edit and default_data.get("match_date") else datetime.today()
+    def_date = datetime.strptime(default_data["match_date"], "%Y-%m-%d").date() if is_edit and default_data.get("match_date") else datetime.today().date()
     def_tournament = default_data.get("tournament_name", "") if is_edit else ""
     def_opponent = default_data.get("opponent_name", "") if is_edit else ""
     def_team = default_data.get("opponent_team", "") if is_edit else ""
 
     def_style = default_data.get("play_style", "未選択") if is_edit else "未選択"
     def_hand = default_data.get("dominant_hand", "未選択") if is_edit else "未選択"
-    def_racket_grip = default_data.get("racket_grip", "シェーク") if is_edit else "シェーク"
+    def_racket_grip = default_data.get("racket_grip", "未選択") if is_edit else "未選択"
     def_fore = default_data.get("fore_rubber", "未選択") if is_edit else "未選択"
     def_back = default_data.get("back_rubber", "未選択") if is_edit else "未選択"
 
@@ -419,17 +795,48 @@ def render_match_form(default_data=None):
         prefix + "fore": def_fore,
         prefix + "back": def_back,
         prefix + "game_count": def_game_count,
+        prefix + "allow_incomplete": False,
         prefix + "tags": def_tags,
         prefix + "reason": def_reason,
     }
-    for state_key, state_value in field_defaults.items():
+    restored_draft = load_form_draft(prefix, is_edit=is_edit)
+    initial_state = dict(field_defaults)
+    initial_state.update(restored_draft)
+    if not is_edit:
+        initial_state.update(
+            {
+                prefix + "team": "",
+                prefix + "style": "未選択",
+                prefix + "hand": "未選択",
+                prefix + "grip": "未選択",
+                prefix + "fore": "未選択",
+                prefix + "back": "未選択",
+                prefix + "opp_reuse": "新しく入力する",
+                prefix + "opp_reuse_applied": "新しく入力する",
+            }
+        )
+
+    for state_key, state_value in initial_state.items():
         if state_key not in st.session_state:
+            st.session_state[state_key] = state_value
+        elif not is_edit and state_key in {
+            prefix + "team",
+            prefix + "style",
+            prefix + "hand",
+            prefix + "grip",
+            prefix + "fore",
+            prefix + "back",
+            prefix + "opp_reuse",
+            prefix + "opp_reuse_applied",
+        }:
             st.session_state[state_key] = state_value
 
     tag_options = load_tag_options(include_hidden=False)
     for tag in def_tags:
         if tag not in tag_options:
             tag_options.append(tag)
+
+    autosave_kwargs = {"on_change": persist_form_draft, "args": (prefix, is_edit)} if not is_edit else {}
 
     opponent_profiles = {}
     preset_key = prefix + "opp_reuse"
@@ -455,6 +862,7 @@ def render_match_form(default_data=None):
                     index=preset_options.index(st.session_state[preset_key]),
                     key=preset_key,
                     help="選択すると相手名・所属チーム・戦型・ラバーなどを自動補完します。",
+                    **autosave_kwargs,
                 )
                 if selected_profile_name != st.session_state.get(preset_applied_key):
                     st.session_state[preset_applied_key] = selected_profile_name
@@ -467,21 +875,22 @@ def render_match_form(default_data=None):
                         st.session_state[prefix + "grip"] = profile["racket_grip"]
                         st.session_state[prefix + "fore"] = profile["fore_rubber"]
                         st.session_state[prefix + "back"] = profile["back_rubber"]
+                    persist_form_draft(prefix, is_edit=is_edit)
                 st.caption("登録済みの相手を選ぶと、相手情報をそのまま再利用できます。")
             else:
                 st.caption("登録済みの相手はまだありません。")
 
         col1, col2 = st.columns(2)
         with col1:
-            match_date = st.date_input("日付", value=st.session_state[prefix + "date"], key=prefix + "date")
+            match_date = st.date_input("日付", value=st.session_state[prefix + "date"], key=prefix + "date", **autosave_kwargs)
         with col2:
-            tournament_name = st.text_input("大会名", value=st.session_state[prefix + "tour"], placeholder="例: 市民卓球大会", key=prefix + "tour")
+            tournament_name = st.text_input("大会名", value=st.session_state[prefix + "tour"], placeholder="例: 市民卓球大会", key=prefix + "tour", **autosave_kwargs)
 
         col_opp1, col_opp2 = st.columns(2)
         with col_opp1:
-            opponent_name = st.text_input("対戦相手名", value=st.session_state[prefix + "opp"], placeholder="例: 山田 太郎", key=prefix + "opp")
+            opponent_name = st.text_input("対戦相手名", value=st.session_state[prefix + "opp"], placeholder="例: 山田 太郎", key=prefix + "opp", **autosave_kwargs)
         with col_opp2:
-            opponent_team = st.text_input("所属チーム", value=st.session_state[prefix + "team"], placeholder="例: ○○クラブ", key=prefix + "team")
+            opponent_team = st.text_input("所属チーム", value=st.session_state[prefix + "team"], placeholder="例: ○○クラブ", key=prefix + "team", **autosave_kwargs)
 
     with st.container():
         st.markdown("### 相手の情報")
@@ -489,24 +898,24 @@ def render_match_form(default_data=None):
         style_opts = ["未選択", "ドライブ主戦", "前陣速攻", "カットマン", "異質攻守"]
         with col3:
             current_style = st.session_state.get(prefix + "style", "未選択")
-            play_style = st.selectbox("戦型", style_opts, index=style_opts.index(current_style) if current_style in style_opts else 0, key=prefix + "style")
+            play_style = st.selectbox("戦型", style_opts, index=style_opts.index(current_style) if current_style in style_opts else 0, key=prefix + "style", **autosave_kwargs)
         with col4:
             hand_opts = ["未選択", "右利き", "左利き"]
             current_hand = st.session_state.get(prefix + "hand", "未選択")
-            dominant_hand = st.selectbox("利き手", hand_opts, index=hand_opts.index(current_hand) if current_hand in hand_opts else 0, key=prefix + "hand")
+            dominant_hand = st.selectbox("利き手", hand_opts, index=hand_opts.index(current_hand) if current_hand in hand_opts else 0, key=prefix + "hand", **autosave_kwargs)
         with col5:
-            grip_opts = ["シェーク", "ペン"]
-            current_grip = st.session_state.get(prefix + "grip", "シェーク")
-            racket_grip = st.selectbox("ラケット", grip_opts, index=grip_opts.index(current_grip) if current_grip in grip_opts else 0, key=prefix + "grip")
+            grip_opts = ["未選択", "シェーク", "ペン"]
+            current_grip = st.session_state.get(prefix + "grip", "未選択")
+            racket_grip = st.selectbox("ラケット", grip_opts, index=grip_opts.index(current_grip) if current_grip in grip_opts else 0, key=prefix + "grip", **autosave_kwargs)
 
         col_rubber1, col_rubber2 = st.columns(2)
         rubber_options = ["未選択", "裏ソフト", "表ソフト", "粒高", "アンチ", "一枚"]
         with col_rubber1:
             current_fore = st.session_state.get(prefix + "fore", "未選択")
-            fore_rubber = st.selectbox("フォアラバー", rubber_options, index=rubber_options.index(current_fore) if current_fore in rubber_options else 0, key=prefix + "fore")
+            fore_rubber = st.selectbox("フォアラバー", rubber_options, index=rubber_options.index(current_fore) if current_fore in rubber_options else 0, key=prefix + "fore", **autosave_kwargs)
         with col_rubber2:
             current_back = st.session_state.get(prefix + "back", "未選択")
-            back_rubber = st.selectbox("バックラバー", rubber_options, index=rubber_options.index(current_back) if current_back in rubber_options else 0, key=prefix + "back")
+            back_rubber = st.selectbox("バックラバー", rubber_options, index=rubber_options.index(current_back) if current_back in rubber_options else 0, key=prefix + "back", **autosave_kwargs)
 
     with st.container():
         st.markdown("### スコア詳細")
@@ -521,6 +930,7 @@ def render_match_form(default_data=None):
                 format_func=lambda x: f"{x}ゲームマッチ",
                 label_visibility="collapsed",
                 key=prefix + "game_count",
+                **autosave_kwargs,
             )
 
         col_my, col_hyphen, col_opp = st.columns([4, 1, 4])
@@ -535,11 +945,11 @@ def render_match_form(default_data=None):
             def_opp_s = def_scores[i - 1][1] if i - 1 < len(def_scores) else 0
             col_my, col_hyphen, col_opp = st.columns([4, 1, 4])
             with col_my:
-                my_s = st.number_input(f"第{i}ゲーム (自分)", min_value=0, max_value=50, value=int(def_my_s), key=f"{prefix}my_{i}", label_visibility="collapsed")
+                my_s = st.number_input(f"第{i}ゲーム (自分)", min_value=0, max_value=50, value=int(def_my_s), key=f"{prefix}my_{i}", label_visibility="collapsed", **autosave_kwargs)
             with col_hyphen:
                 st.markdown("<div style='text-align: center; font-size: 1.5em; color: #6c757d;'>-</div>", unsafe_allow_html=True)
             with col_opp:
-                opp_s = st.number_input(f"第{i}ゲーム (相手)", min_value=0, max_value=50, value=int(def_opp_s), key=f"{prefix}opp_{i}", label_visibility="collapsed")
+                opp_s = st.number_input(f"第{i}ゲーム (相手)", min_value=0, max_value=50, value=int(def_opp_s), key=f"{prefix}opp_{i}", label_visibility="collapsed", **autosave_kwargs)
             scores.append((my_s, opp_s))
 
         my_set_count, opp_set_count = calculate_set_count(scores)
@@ -550,16 +960,25 @@ def render_match_form(default_data=None):
             f"<h2 style='text-align: center; color: #2c3e50;'>自分 <span style='color:#007bff;'>{my_set_count}</span> - <span style='color:#dc3545;'>{opp_set_count}</span> 相手</h2>",
             unsafe_allow_html=True,
         )
+        allow_incomplete = st.checkbox(
+            "相手の棄権・途中終了などで不完全なスコアを保存する",
+            key=prefix + "allow_incomplete",
+            help="未決着のゲームや、勝敗決定前の途中終了スコアでも保存できるようにします。",
+            **autosave_kwargs,
+        )
+        if allow_incomplete:
+            st.caption("未決着のスコアは警告表示にとどめて保存します。通常の勝敗入力ルールは一部緩和されます。")
 
     with st.container():
         st.markdown("### 振り返り")
-        issue_tags = st.multiselect("課題タグ (複数選択可)", tag_options, default=st.session_state[prefix + "tags"], key=prefix + "tags")
+        issue_tags = st.multiselect("課題タグ (複数選択可)", tag_options, default=st.session_state[prefix + "tags"], key=prefix + "tags", **autosave_kwargs)
         win_loss_reason = st.text_area(
             "勝因・敗因 / メモ",
             value=st.session_state[prefix + "reason"],
             height=150,
             placeholder="ここに試合の反省点や次への課題を入力してください...",
             key=prefix + "reason",
+            **autosave_kwargs,
         )
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -576,92 +995,123 @@ def render_match_form(default_data=None):
                 st.session_state[f"show_edit_{default_data['id']}"] = False
                 st.rerun()
     else:
-        if st.button("試合結果を登録する", key=prefix + "submit", type="secondary", use_container_width=True):
-            submit_clicked = True
+        st.caption("入力内容は端末内に自動保存されます。アプリを開き直しても、新規登録フォームの途中入力を復元できます。")
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("試合結果を登録する", key=prefix + "submit", type="secondary", use_container_width=True):
+                submit_clicked = True
+        with col_btn2:
+            if st.button("入力中データを破棄", key=prefix + "discard", use_container_width=True):
+                clear_form_draft(prefix, is_edit=is_edit)
+                clear_form_state(prefix)
+                st.success("入力中の下書きを破棄しました。")
+                st.rerun()
 
     if submit_clicked:
         if not opponent_name:
             st.error("対戦相手名は必須入力です。")
         else:
-            errors = validate_scores(scores, game_count)
+            errors, warnings = validate_scores(scores, game_count, allow_incomplete=allow_incomplete)
             if errors:
                 for err in errors:
                     st.error(err)
             else:
+                for warning in warnings:
+                    st.warning(warning)
                 try:
-                    conn = sqlite3.connect(DB_NAME)
-                    c = conn.cursor()
                     scores_json = json.dumps(scores)
                     tags_json = json.dumps(issue_tags)
+                    def write_operation(conn):
+                        c = conn.cursor()
+                        if is_edit:
+                            c.execute(
+                                '''
+                                UPDATE matches SET 
+                                    match_date=?, tournament_name=?, opponent_name=?, opponent_team=?,
+                                    play_style=?, fore_rubber=?, back_rubber=?, dominant_hand=?, racket_grip=?, game_count=?, 
+                                    my_set_count=?, opp_set_count=?, scores=?, win_loss_reason=?, issue_tags=?
+                                WHERE id=?
+                                ''',
+                                (
+                                    str(match_date),
+                                    tournament_name,
+                                    opponent_name,
+                                    opponent_team,
+                                    play_style,
+                                    fore_rubber,
+                                    back_rubber,
+                                    dominant_hand,
+                                    racket_grip,
+                                    game_count,
+                                    my_set_count,
+                                    opp_set_count,
+                                    scores_json,
+                                    win_loss_reason,
+                                    tags_json,
+                                    default_data["id"],
+                                ),
+                            )
+                        else:
+                            c.execute(
+                                '''
+                                INSERT INTO matches (
+                                    match_date, tournament_name, opponent_name, opponent_team,
+                                    play_style, fore_rubber, back_rubber, dominant_hand, racket_grip, game_count,
+                                    my_set_count, opp_set_count, scores, win_loss_reason, issue_tags, created_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ''',
+                                (
+                                    str(match_date),
+                                    tournament_name,
+                                    opponent_name,
+                                    opponent_team,
+                                    play_style,
+                                    fore_rubber,
+                                    back_rubber,
+                                    dominant_hand,
+                                    racket_grip,
+                                    game_count,
+                                    my_set_count,
+                                    opp_set_count,
+                                    scores_json,
+                                    win_loss_reason,
+                                    tags_json,
+                                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                ),
+                            )
+
+                    run_write_transaction(write_operation)
+
+                    backup_notice = None
+                    try:
+                        backup_path, removed_paths = create_auto_backup()
+                        backup_notice = f"自動バックアップを更新しました: {backup_path}"
+                        if removed_paths:
+                            backup_notice += f"（古いバックアップを {len(removed_paths)} 件整理）"
+                    except Exception as backup_error:
+                        backup_notice = f"保存は完了しましたが、自動バックアップに失敗しました: {backup_error}"
 
                     if is_edit:
-                        c.execute(
-                            '''
-                            UPDATE matches SET 
-                                match_date=?, tournament_name=?, opponent_name=?, opponent_team=?,
-                                play_style=?, fore_rubber=?, back_rubber=?, dominant_hand=?, racket_grip=?, game_count=?, 
-                                my_set_count=?, opp_set_count=?, scores=?, win_loss_reason=?, issue_tags=?
-                            WHERE id=?
-                            ''',
-                            (
-                                str(match_date),
-                                tournament_name,
-                                opponent_name,
-                                opponent_team,
-                                play_style,
-                                fore_rubber,
-                                back_rubber,
-                                dominant_hand,
-                                racket_grip,
-                                game_count,
-                                my_set_count,
-                                opp_set_count,
-                                scores_json,
-                                win_loss_reason,
-                                tags_json,
-                                default_data["id"],
-                            ),
-                        )
                         st.success("変更を保存しました！データを更新します...")
                         st.session_state[f"show_edit_{default_data['id']}"] = False
                     else:
-                        c.execute(
-                            '''
-                            INSERT INTO matches (
-                                match_date, tournament_name, opponent_name, opponent_team,
-                                play_style, fore_rubber, back_rubber, dominant_hand, racket_grip, game_count,
-                                my_set_count, opp_set_count, scores, win_loss_reason, issue_tags, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ''',
-                            (
-                                str(match_date),
-                                tournament_name,
-                                opponent_name,
-                                opponent_team,
-                                play_style,
-                                fore_rubber,
-                                back_rubber,
-                                dominant_hand,
-                                racket_grip,
-                                game_count,
-                                my_set_count,
-                                opp_set_count,
-                                scores_json,
-                                win_loss_reason,
-                                tags_json,
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            ),
-                        )
                         st.success(f"{opponent_name} 選手との試合結果を登録しました！データを更新します...")
+                        clear_form_draft(prefix, is_edit=is_edit)
+                        clear_form_state(prefix)
                         st.balloons()
 
-                    conn.commit()
-                    conn.close()
+                    if backup_notice:
+                        if "失敗" in backup_notice:
+                            st.warning(backup_notice)
+                            st.session_state["app_notice"] = {"level": "warning", "message": backup_notice}
+                        else:
+                            st.info(backup_notice)
+                            st.session_state["app_notice"] = {"level": "info", "message": backup_notice}
 
                     time.sleep(1.5)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"エラーが発生しました: {e}")
+                    st.error(format_database_error(e, "保存"))
 
 
 # --- アプリケーション設定 ---
@@ -691,6 +1141,14 @@ def main():
     init_db()
 
     st.title("🏓 ピンポンの記録")
+    app_notice = st.session_state.pop("app_notice", None) if "app_notice" in st.session_state else None
+    if app_notice:
+        notice_level = app_notice.get("level", "info")
+        notice_message = app_notice.get("message", "")
+        if hasattr(st, notice_level):
+            getattr(st, notice_level)(notice_message)
+        else:
+            st.info(notice_message)
 
     tab1, tab2, tab3 = st.tabs(["📖 履歴と編集", "📊 分析・ダッシュボード", "📝 試合結果の登録"])
 
@@ -870,18 +1328,18 @@ def main():
                             with col_d1:
                                 if st.button("はい、削除します", key=f"btn_del_confirm_{row['id']}", type="primary", use_container_width=True):
                                     try:
-                                        conn = sqlite3.connect(DB_NAME)
-                                        c = conn.cursor()
-                                        c.execute("DELETE FROM matches WHERE id=?", (row["id"],))
-                                        conn.commit()
-                                        conn.close()
+                                        def write_operation(conn):
+                                            c = conn.cursor()
+                                            c.execute("DELETE FROM matches WHERE id=?", (row["id"],))
+
+                                        run_write_transaction(write_operation)
                                         if "history_table" in st.session_state:
                                             del st.session_state["history_table"]
                                         st.success("試合記録を削除しました！データを更新します...")
                                         time.sleep(1.5)
                                         st.rerun()
                                     except Exception as e:
-                                        st.error(f"削除中にエラーが発生しました: {e}")
+                                        st.error(format_database_error(e, "削除"))
                             with col_d2:
                                 if st.button("キャンセル", key=f"btn_del_cancel_{row['id']}", use_container_width=True):
                                     st.session_state[del_key] = False
@@ -894,6 +1352,26 @@ def main():
             st.markdown("---")
             with st.expander("データ管理", expanded=False):
                 st.caption("通常は使いません。必要な場合のみデータベース初期化を実行してください。")
+                st.markdown("#### バックアップ")
+                st.caption(f"登録・編集の保存成功時に、自動バックアップを `{AUTO_BACKUP_DIR}` へ日次7世代で保存します。")
+                auto_backups = list_auto_backup_paths()
+                if auto_backups:
+                    st.caption(f"最新の自動バックアップ: {auto_backups[0]}")
+                else:
+                    st.caption("自動バックアップはまだ作成されていません。")
+                st.caption("下のダウンロードは、Google Drive などアプリ外へ退避するための手動バックアップです。")
+                try:
+                    st.download_button(
+                        "📦 SQLiteバックアップをダウンロード",
+                        data=build_db_backup_bytes(),
+                        file_name=build_db_backup_filename(),
+                        mime="application/octet-stream",
+                        use_container_width=True,
+                    )
+                except Exception as e:
+                    st.error(f"バックアップファイルの作成に失敗しました: {e}")
+
+                st.markdown("#### 初期化")
                 reset_key = "show_reset_db_confirm"
                 if not st.session_state.get(reset_key, False):
                     if st.button("データベース初期化", key="btn_show_reset_db", use_container_width=True):
