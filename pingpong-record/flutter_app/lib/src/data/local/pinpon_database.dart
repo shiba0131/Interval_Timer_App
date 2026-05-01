@@ -15,16 +15,20 @@ class PinponDatabase {
 
   static const defaultTagOptions = <String>[
     'サーブミス',
+    'スマッシュミス',
     'レシーブミス',
     '3球目攻撃ミス',
     'ツッツキミス',
-    'スピード不足',
     'ドライブミス',
     'ブロックミス',
     'フットワーク',
     'メンタル',
+    'フォアカットミス',
+    'バックカットミス',
+    'プッシュミス',
     '戦術ミス',
     'スタミナ切れ',
+    'スピード不足',
   ];
 
   Database? _database;
@@ -150,23 +154,36 @@ class PinponDatabase {
   }
 
   Future<void> _seedDefaultTags(Database database) async {
-    final countResult = await database.rawQuery(
-      'SELECT COUNT(*) AS count FROM $tagDefinitionsTable',
+    final rows = await database.query(
+      tagDefinitionsTable,
+      columns: ['tag_name'],
     );
-    final count = (countResult.first['count'] as int?) ?? 0;
-    if (count > 0) {
-      return;
-    }
+    final existingTags = {
+      for (final row in rows) (row['tag_name'] as String?) ?? '',
+    }..remove('');
 
     final nowText = DateTime.now().toIso8601String();
     final batch = database.batch();
     for (var index = 0; index < defaultTagOptions.length; index++) {
-      batch.insert(tagDefinitionsTable, {
-        'tag_name': defaultTagOptions[index],
-        'is_hidden': 0,
-        'sort_order': index,
-        'created_at': nowText,
-      });
+      final tagName = defaultTagOptions[index];
+      if (!existingTags.contains(tagName)) {
+        batch.insert(tagDefinitionsTable, {
+          'tag_name': tagName,
+          'is_hidden': 0,
+          'sort_order': index,
+          'created_at': nowText,
+        });
+      } else {
+        batch.update(
+          tagDefinitionsTable,
+          {
+            'is_hidden': 0,
+            'sort_order': index,
+          },
+          where: 'tag_name = ?',
+          whereArgs: [tagName],
+        );
+      }
     }
     await batch.commit(noResult: true);
   }

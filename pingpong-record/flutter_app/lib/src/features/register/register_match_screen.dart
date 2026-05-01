@@ -9,6 +9,21 @@ import '../../data/repositories/pinpon_repository.dart';
 import '../backup/backup_service.dart';
 import 'match_form_logic.dart';
 
+/// 入力値（負けた側のスコア）から勝者のスコアを計算する。
+/// 1〜9点 → 11
+/// 10点以上 → 入力値 + 2（デュース）
+/// 空白・0 → null（何もしない）
+String? calcWinnerScore(String rawValue) {
+  final parsed = int.tryParse(rawValue.trim());
+  if (parsed == null || parsed <= 0) {
+    return null;
+  }
+  if (parsed <= 9) {
+    return '11';
+  }
+  return (parsed + 2).toString();
+}
+
 class RegisterMatchScreen extends StatelessWidget {
   const RegisterMatchScreen({
     super.key,
@@ -25,7 +40,8 @@ class RegisterMatchScreen extends StatelessWidget {
       repository: repository,
       title: '試合結果の登録',
       submitLabel: '試合結果を登録する',
-      successMessageBuilder: (match) => '${match.opponentName} 選手との試合結果を登録しました。',
+      successMessageBuilder: (match) =>
+          '${match.opponentName} 選手との試合結果を登録しました。',
       enableDraft: true,
       onDataChanged: onDataChanged,
     );
@@ -92,15 +108,21 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
   final _opponentController = TextEditingController();
   final _teamController = TextEditingController();
   final _reasonController = TextEditingController();
-  final _myScoreControllers =
-      List.generate(_maxGameCount, (_) => TextEditingController());
-  final _oppScoreControllers =
-      List.generate(_maxGameCount, (_) => TextEditingController());
+  final _myScoreControllers = List.generate(
+    _maxGameCount,
+    (_) => TextEditingController(),
+  );
+  final _oppScoreControllers = List.generate(
+    _maxGameCount,
+    (_) => TextEditingController(),
+  );
   final BackupService _backupService = BackupService();
 
   late Future<void> _bootstrapFuture;
 
   Timer? _draftTimer;
+  // ゲームごとのスコア自動補完デバウンスタイマー（_maxGameCount 個）
+  late final List<Timer?> _scoreAutofillTimers;
   bool _isInitialized = false;
   bool _isSaving = false;
   bool _autosaveEnabled = false;
@@ -116,9 +138,6 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
   String _backRubber = rubberOptions.first;
   String _selectedProfileName = '新しく入力する';
 
-  String? _databasePath;
-  int _matchCount = 0;
-  int _tagCount = 0;
   List<String> _availableTags = [];
   List<String> _selectedTags = [];
   List<OpponentProfile> _profiles = [];
@@ -131,6 +150,7 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
   @override
   void initState() {
     super.initState();
+    _scoreAutofillTimers = List<Timer?>.filled(_maxGameCount, null, growable: false);
     _bootstrapFuture = _loadBootstrap();
 
     for (final controller in [
@@ -148,6 +168,9 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
   @override
   void dispose() {
     _draftTimer?.cancel();
+    for (var i = 0; i < _maxGameCount; i++) {
+      _scoreAutofillTimers[i]?.cancel();
+    }
     for (final controller in [
       _tournamentController,
       _opponentController,
@@ -162,8 +185,9 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
   }
 
   Future<void> _loadBootstrap() async {
-    final snapshot = await widget.repository.loadSnapshot();
-    final tags = await widget.repository.loadTagDefinitions(includeHidden: false);
+    final tags = await widget.repository.loadTagDefinitions(
+      includeHidden: false,
+    );
     final profiles = await widget.repository.loadOpponentProfiles();
     final draft = widget.enableDraft
         ? await widget.repository.loadDraft(_draftKey)
@@ -173,9 +197,6 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
       return;
     }
 
-    _databasePath = snapshot.databasePath;
-    _matchCount = snapshot.matchCount;
-    _tagCount = snapshot.tagCount;
     _availableTags = tags.map((tag) => tag.tagName).toList(growable: false);
     _profiles = profiles;
 
@@ -193,7 +214,9 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
     _resetFormState(clearMessages: false);
 
     _matchDate = DateTime.tryParse(match.matchDate ?? '') ?? DateTime.now();
-    _gameCount = gameCountOptions.contains(match.gameCount) ? match.gameCount : 5;
+    _gameCount = gameCountOptions.contains(match.gameCount)
+        ? match.gameCount
+        : 5;
     _playStyle = _safeOption(match.playStyle, playStyleOptions);
     _dominantHand = _safeOption(match.dominantHand, dominantHandOptions);
     _racketGrip = _safeOption(match.racketGrip, racketGripOptions);
@@ -211,8 +234,9 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
     ];
 
     for (var i = 0; i < _maxGameCount; i++) {
-      final score =
-          i < match.scores.length ? match.scores[i] : const ScoreEntry(myScore: 0, oppScore: 0);
+      final score = i < match.scores.length
+          ? match.scores[i]
+          : const ScoreEntry(myScore: 0, oppScore: 0);
       _myScoreControllers[i].text = score.myScore.toString();
       _oppScoreControllers[i].text = score.oppScore.toString();
     }
@@ -248,8 +272,10 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
       stringValue(payload['back'], fallback: rubberOptions.first),
       rubberOptions,
     );
-    _selectedProfileName =
-        stringValue(payload['opp_reuse'], fallback: '新しく入力する');
+    _selectedProfileName = stringValue(
+      payload['opp_reuse'],
+      fallback: '新しく入力する',
+    );
 
     _tournamentController.text = stringValue(payload['tour']);
     _opponentController.text = stringValue(payload['opp']);
@@ -262,7 +288,9 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
 
     for (var i = 0; i < _maxGameCount; i++) {
       _myScoreControllers[i].text = intValue(payload['my_${i + 1}']).toString();
-      _oppScoreControllers[i].text = intValue(payload['opp_${i + 1}']).toString();
+      _oppScoreControllers[i].text = intValue(
+        payload['opp_${i + 1}'],
+      ).toString();
     }
   }
 
@@ -282,7 +310,10 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
     _opponentController.clear();
     _teamController.clear();
     _reasonController.clear();
-    for (final controller in [..._myScoreControllers, ..._oppScoreControllers]) {
+    for (final controller in [
+      ..._myScoreControllers,
+      ..._oppScoreControllers,
+    ]) {
       controller.text = '0';
     }
 
@@ -361,6 +392,14 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
     return parsed;
   }
 
+  void _selectScoreText(TextEditingController controller) {
+    final textLength = controller.text.length;
+    controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: textLength,
+    );
+  }
+
   void _handleScoreChanged({
     required int index,
     required bool changedMySide,
@@ -369,24 +408,37 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
     if (_isApplyingScoreAutofill) {
       return;
     }
-
-    final parsed = int.tryParse(rawValue.trim());
-    if (parsed == null || parsed < 0 || parsed > 9) {
+    // 棄権チェックON時は自動計算なし
+    if (_allowIncomplete) {
       return;
     }
 
-    final targetController =
-        changedMySide ? _oppScoreControllers[index] : _myScoreControllers[index];
-    if (targetController.text == '11') {
-      return;
-    }
+    // 入力が落ち着いてから（400ms後）自動補完を実行する
+    // → 複数桁入力の途中で誤った値がセットされるのを防ぐ
+    _scoreAutofillTimers[index]?.cancel();
+    _scoreAutofillTimers[index] = Timer(const Duration(milliseconds: 400), () {
+      if (!mounted) return;
 
-    _isApplyingScoreAutofill = true;
-    targetController.value = TextEditingValue(
-      text: '11',
-      selection: const TextSelection.collapsed(offset: 2),
-    );
-    _isApplyingScoreAutofill = false;
+      // タイマー発火時点でのコントローラの最新値を使う
+      final loserController = changedMySide
+          ? _myScoreControllers[index]
+          : _oppScoreControllers[index];
+      final latestValue = loserController.text;
+      final winnerValue = calcWinnerScore(latestValue);
+      if (winnerValue == null) return;
+
+      // 変更した側が「負け側」→ 反対側（勝者）を自動セット
+      final winnerController = changedMySide
+          ? _oppScoreControllers[index]
+          : _myScoreControllers[index];
+
+      _isApplyingScoreAutofill = true;
+      winnerController.value = TextEditingValue(
+        text: winnerValue,
+        selection: TextSelection.collapsed(offset: winnerValue.length),
+      );
+      _isApplyingScoreAutofill = false;
+    });
   }
 
   String _dateText(DateTime date) {
@@ -455,9 +507,9 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
     if (!mounted) {
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('入力中の下書きを破棄しました。')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('入力中の下書きを破棄しました。')));
   }
 
   Future<void> _saveMatch() async {
@@ -532,9 +584,6 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
 
       _autosaveEnabled = false;
       setState(() {
-        _databasePath = snapshot.databasePath;
-        _matchCount = snapshot.matchCount;
-        _tagCount = snapshot.tagCount;
         _availableTags = snapshot.tags
             .where((tag) => !tag.isHidden)
             .map((tag) => tag.tagName)
@@ -548,10 +597,7 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
           _successMessage = widget.successMessageBuilder(savingMatch);
         }
         if (backupNotice != null) {
-          _warnings = [
-            ..._warnings,
-            backupNotice,
-          ];
+          _warnings = [..._warnings, backupNotice];
         }
       });
       _autosaveEnabled = widget.enableDraft;
@@ -562,9 +608,9 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
       }
 
       final successText = widget.successMessageBuilder(savingMatch);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(successText)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(successText)));
 
       if (_isEdit) {
         Navigator.of(context).pop(true);
@@ -648,16 +694,7 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    Wrap(
-                      spacing: 12,
-                      runSpacing: 12,
-                      children: [
-                        _TopStatPill(label: 'DB', value: _databasePath ?? '-'),
-                        _TopStatPill(label: '試合数', value: '$_matchCount'),
-                        _TopStatPill(label: 'タグ数', value: '$_tagCount'),
-                      ],
-                    ),
+
                   ],
                 ),
               ),
@@ -683,9 +720,12 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
                     if (!_isEdit && _profiles.isNotEmpty) ...[
                       DropdownButtonFormField<String>(
                         initialValue:
-                            _profiles.any((profile) => profile.opponentName == _selectedProfileName)
-                                ? _selectedProfileName
-                                : '新しく入力する',
+                            _profiles.any(
+                              (profile) =>
+                                  profile.opponentName == _selectedProfileName,
+                            )
+                            ? _selectedProfileName
+                            : '新しく入力する',
                         decoration: const InputDecoration(
                           labelText: '登録済み相手から再利用',
                           border: OutlineInputBorder(),
@@ -729,10 +769,20 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
                     const SizedBox(height: 12),
                     TextField(
                       controller: _opponentController,
-                      decoration: const InputDecoration(
-                        labelText: '対戦相手名',
-                        border: OutlineInputBorder(),
+                      decoration: InputDecoration(
+                        labelText: '対戦相手名 *',
+                        border: const OutlineInputBorder(),
                         hintText: '例: 山田 太郎',
+                        labelStyle: TextStyle(
+                          color: theme.colorScheme.error,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderSide: BorderSide(
+                            color: theme.colorScheme.error,
+                            width: 2,
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(height: 12),
@@ -853,6 +903,8 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
                             child: TextField(
                               controller: _myScoreControllers[i],
                               keyboardType: TextInputType.number,
+                              onTap: () =>
+                                  _selectScoreText(_myScoreControllers[i]),
                               onChanged: (value) => _handleScoreChanged(
                                 index: i,
                                 changedMySide: true,
@@ -860,7 +912,7 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
                               ),
                               inputFormatters: [
                                 FilteringTextInputFormatter.digitsOnly,
-                                _ScoreRangeInputFormatter(),
+                                ScoreRangeInputFormatter(),
                               ],
                               decoration: InputDecoration(
                                 labelText: '第${i + 1}ゲーム 自分',
@@ -876,6 +928,8 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
                             child: TextField(
                               controller: _oppScoreControllers[i],
                               keyboardType: TextInputType.number,
+                              onTap: () =>
+                                  _selectScoreText(_oppScoreControllers[i]),
                               onChanged: (value) => _handleScoreChanged(
                                 index: i,
                                 changedMySide: false,
@@ -883,7 +937,7 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
                               ),
                               inputFormatters: [
                                 FilteringTextInputFormatter.digitsOnly,
-                                _ScoreRangeInputFormatter(),
+                                ScoreRangeInputFormatter(),
                               ],
                               decoration: InputDecoration(
                                 labelText: '第${i + 1}ゲーム 相手',
@@ -910,7 +964,9 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
                         borderRadius: BorderRadius.circular(16),
                         boxShadow: [
                           BoxShadow(
-                            color: theme.colorScheme.primary.withValues(alpha: 0.18),
+                            color: theme.colorScheme.primary.withValues(
+                              alpha: 0.18,
+                            ),
                             blurRadius: 18,
                             offset: const Offset(0, 8),
                           ),
@@ -928,8 +984,11 @@ class _MatchFormScreenState extends State<MatchFormScreen> {
                     CheckboxListTile(
                       value: _allowIncomplete,
                       contentPadding: EdgeInsets.zero,
-                      title: const Text('相手の棄権・途中終了などで不完全なスコアを保存する'),
-                      subtitle: const Text('未決着のゲームや参考スコアも警告扱いで保存します。'),
+                      title: const Text('特殊スコアモード（棄権・ラブゲームなど）'),
+                      subtitle: const Text(
+                        'スコアの自動補完を無効にし、両方のスコアを自由に入力できます。\n'
+                        '相手の棄権・途中退場や、ラブゲーム（11-0）の記録に使用してください。',
+                      ),
                       onChanged: (value) {
                         setState(() {
                           _allowIncomplete = value ?? false;
@@ -1044,10 +1103,7 @@ class _DropdownField extends StatelessWidget {
       ),
       items: [
         for (final item in items)
-          DropdownMenuItem(
-            value: item,
-            child: Text(item),
-          ),
+          DropdownMenuItem(value: item, child: Text(item)),
       ],
       onChanged: (selected) {
         if (selected != null) {
@@ -1058,64 +1114,9 @@ class _DropdownField extends StatelessWidget {
   }
 }
 
-class _TopStatPill extends StatelessWidget {
-  const _TopStatPill({
-    required this.label,
-    required this.value,
-  });
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      constraints: const BoxConstraints(minWidth: 96),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [
-            theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.72),
-            Colors.white,
-          ],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: theme.colorScheme.outlineVariant),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            label,
-            style: theme.textTheme.labelLarge?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            value,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
 
 class _MessageCard extends StatelessWidget {
-  const _MessageCard({
-    required this.color,
-    required this.messages,
-  });
+  const _MessageCard({required this.color, required this.messages});
 
   final Color color;
   final List<String> messages;
@@ -1131,10 +1132,7 @@ class _MessageCard extends StatelessWidget {
             for (final message in messages)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
-                  message,
-                  style: TextStyle(color: color),
-                ),
+                child: Text(message, style: TextStyle(color: color)),
               ),
           ],
         ),
@@ -1143,7 +1141,7 @@ class _MessageCard extends StatelessWidget {
   }
 }
 
-class _ScoreRangeInputFormatter extends TextInputFormatter {
+class ScoreRangeInputFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(
     TextEditingValue oldValue,
@@ -1156,6 +1154,13 @@ class _ScoreRangeInputFormatter extends TextInputFormatter {
     if (parsed == null || parsed > 50) {
       return oldValue;
     }
-    return newValue;
+    final normalized = parsed.toString();
+    if (normalized == newValue.text) {
+      return newValue;
+    }
+    return TextEditingValue(
+      text: normalized,
+      selection: TextSelection.collapsed(offset: normalized.length),
+    );
   }
 }

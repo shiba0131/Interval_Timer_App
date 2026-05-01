@@ -1,0 +1,48 @@
+﻿ aabファイルを作るには？
+
+
+• AAB は Flutter 側で作れます。場所は flutter_app フォルダです。
+
+  まず最低限これです。
+
+  cd flutter_app
+  flutter build appbundle
+
+  成功すると通常ここに出ます。
+
+  flutter_app/build/app/outputs/bundle/release/app-release.aab
+
+  ただし、Play Console に上げる用途なら実質 署名設定 が必要です。流れはこうです。
+
+  1. keystore を作る
+  2. android/key.properties を作る
+  3. android/app/build.gradle.kts か build.gradle に署名設定を書く
+  4. flutter build appbundle
+
+  Windows で keystore を作る例です。
+
+  keytool -genkey -v -keystore C:\Users\User\upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+
+  その後、flutter_app/android/key.properties にこう書きます。
+
+  storePassword=あなたのパスワード
+  keyPassword=あなたのパスワード
+  keyAlias=upload
+  storeFile=C:\\Users\\User\\upload-keystore.jks
+
+  そのうえで android/app/build.gradle 系に signingConfig を入れます。
+  この設定が終われば、以後は毎回これです。
+
+  flutter build appbundle
+
+  補足です。
+
+  - 配布前なら flutter analyze と flutter test を先に通すのが安全です。
+  - pubspec.yaml の version: 1.0.0+1 も更新してから作るのが普通です。
+  - 初回は applicationId を com.example... から固有名に変えるべきです。
+
+  必要なら次に、この flutter_app 用に
+
+  - applicationId の変更
+  - key.properties 前提の Gradle 設定
+    まで実際にこちらで入れます。

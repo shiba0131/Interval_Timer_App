@@ -35,7 +35,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
   late Future<List<MatchRecord>> _matchesFuture;
   String _selectedStyle = 'すべて';
   String _selectedResult = 'すべて';
-  int? _selectedMatchId;
   SelectedBackupFile? _selectedBackupFile;
   bool _confirmRestore = false;
   bool _isProcessingBackup = false;
@@ -105,6 +104,35 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
+  Future<void> _showDetailBottomSheet(MatchRecord match) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (sheetContext) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        minChildSize: 0.4,
+        maxChildSize: 0.92,
+        expand: false,
+        builder: (_, scrollController) => _MatchDetailSheet(
+          match: match,
+          scrollController: scrollController,
+          onEdit: () async {
+            Navigator.of(sheetContext).pop();
+            await _openEditScreen(match);
+          },
+          onDelete: () async {
+            Navigator.of(sheetContext).pop();
+            await _deleteMatch(match);
+          },
+        ),
+      ),
+    );
+  }
+
   Future<void> _deleteMatch(MatchRecord match) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -138,11 +166,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
       const SnackBar(content: Text('試合記録を削除しました。')),
     );
 
-    if (_selectedMatchId == match.id) {
-      setState(() {
-        _selectedMatchId = null;
-      });
-    }
     await _reload();
   }
 
@@ -231,7 +254,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
       setState(() {
         _selectedBackupFile = null;
         _confirmRestore = false;
-        _selectedMatchId = null;
         _backupNotice =
             'バックアップから復元しました。復元前のデータは ${preRestoreBackup.path} に保存しています。';
       });
@@ -257,7 +279,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
       builder: (context) => AlertDialog(
         title: const Text('テストデータを追加'),
         content: const Text(
-          'テストデータを 50 件追加します。約 33% は同じ対戦相手になります。既存データは残したまま追加されます。',
+          '10人の固定対戦相手に対して各５試合、50件の記録を追加します。各選手には戦型・用具・固有の勝敗メモが設定されています。既存データは残したまま追加されます。',
         ),
         actions: [
           TextButton(
@@ -282,10 +304,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     });
 
     try {
-      await _testDataService.insertSampleMatches(
-        totalCount: 50,
-        fixedOpponentCount: 17,
-      );
+      await _testDataService.insertSampleMatches();
       widget.onDataChanged();
       await _backupService.createAutoBackup();
       await _reload();
@@ -294,7 +313,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
       }
       setState(() {
         _backupNotice =
-            'テストデータを 50 件追加しました。うち 17 件は同一人物です。';
+            'テストデータを追加しました（10人の対戦相手 × 各5試合 = 50件）。';
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -379,8 +398,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
         }
 
         final filteredMatches = _applyFilters(matches);
-        final selectedMatch = filteredMatches.where((match) => match.id == _selectedMatchId).firstOrNull ??
-            (filteredMatches.isNotEmpty ? filteredMatches.first : null);
         final totalWins = matches.where((match) => match.isWin).length;
         final totalLosses = matches.where((match) => match.isLoss).length;
         final styleOptions = <String>{
@@ -388,15 +405,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
           ...matches.map((match) => match.playStyle).where((style) => style.trim().isNotEmpty),
         }.toList(growable: false);
 
-        if (selectedMatch != null && _selectedMatchId != selectedMatch.id) {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) {
-              setState(() {
-                _selectedMatchId = selectedMatch.id;
-              });
-            }
-          });
-        }
 
         return RefreshIndicator(
           onRefresh: _reload,
@@ -522,25 +530,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             padding: const EdgeInsets.only(bottom: 12),
                             child: _MatchListTile(
                               match: match,
-                              selected: match.id == selectedMatch?.id,
-                              onTap: () {
-                                setState(() {
-                                  _selectedMatchId = match.id;
-                                });
-                              },
+                              selected: false,
+                              onTap: () => _showDetailBottomSheet(match),
                             ),
                           ),
                       ],
                     ),
                   ),
                 ),
-                const SizedBox(height: 16),
-                if (selectedMatch != null)
-                  _MatchDetailCard(
-                    match: selectedMatch,
-                    onEdit: () => _openEditScreen(selectedMatch),
-                    onDelete: () => _deleteMatch(selectedMatch),
-                  ),
                 const SizedBox(height: 16),
                 _DeveloperToolsCard(
                   isProcessing: _isProcessingBackup,
@@ -616,13 +613,13 @@ class _DeveloperToolsCard extends StatelessWidget {
             Text('開発用', style: theme.textTheme.titleLarge),
             const SizedBox(height: 8),
             Text(
-              '分析や履歴表示の確認用に、50 件のテストデータを追加できます。約 33% は同じ対戦相手です。',
+              '分析や履歴表示の確認用に、固定10人の対戦相手データ（各5試合＝50件）を追加できます。各選手に戦型・用具・勝敗メモが設定されています。',
               style: theme.textTheme.bodyMedium,
             ),
             const SizedBox(height: 12),
             FilledButton.tonal(
               onPressed: isProcessing ? null : onInsertSampleData,
-              child: const Text('テストデータを50件追加する'),
+              child: const Text('テストデータを追加する（50件）'),
             ),
           ],
         ),
@@ -856,43 +853,240 @@ class _MatchListTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final accentColor =
+        match.isWin ? theme.colorScheme.secondary : theme.colorScheme.tertiary;
+    final accentTint =
+        match.isWin ? const Color(0xFFEEF8FA) : const Color(0xFFFCEEEA);
+    final headlineColor = selected ? Colors.white : theme.colorScheme.onSurface;
+    final sublineColor = selected
+        ? Colors.white.withValues(alpha: 0.76)
+        : theme.colorScheme.onSurfaceVariant;
+    final scoreboardGradient = selected
+        ? [
+            Colors.white.withValues(alpha: 0.2),
+            Colors.white.withValues(alpha: 0.08),
+          ]
+        : [
+            theme.colorScheme.primary.withValues(alpha: 0.98),
+            const Color(0xFF16324F),
+          ];
 
     return Material(
-      color: selected
-          ? theme.colorScheme.primaryContainer.withValues(alpha: 0.55)
-          : theme.colorScheme.surface,
-      borderRadius: BorderRadius.circular(16),
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(24),
       child: InkWell(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(24),
         onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: selected
+                ? const LinearGradient(
+                    colors: [
+                      Color(0xFF0D1B2A),
+                      Color(0xFF14304A),
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  )
+                : LinearGradient(
+                    colors: [
+                      Colors.white,
+                      accentTint,
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: selected
+                  ? accentColor.withValues(alpha: 0.95)
+                  : accentColor.withValues(alpha: 0.25),
+              width: selected ? 1.5 : 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: theme.colorScheme.primary.withValues(
+                  alpha: selected ? 0.16 : 0.06,
+                ),
+                blurRadius: selected ? 22 : 14,
+                offset: const Offset(0, 10),
+              ),
+            ],
+          ),
+          child: Stack(
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      '${match.matchDateText} vs ${match.opponentName}',
-                      style: theme.textTheme.titleMedium,
+              Positioned(
+                left: 0,
+                top: 0,
+                bottom: 0,
+                child: Container(
+                  width: 8,
+                  decoration: BoxDecoration(
+                    color: accentColor,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(24),
+                      bottomLeft: Radius.circular(24),
                     ),
                   ),
-                  _ResultBadge(resultLabel: match.resultLabel),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                match.tournamentName.isEmpty ? '大会名なし' : match.tournamentName,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  fontWeight: FontWeight.w600,
                 ),
               ),
-              const SizedBox(height: 4),
-              Text(
-                '${match.playStyle} | ${match.mySetCount} - ${match.oppSetCount}',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
+              Padding(
+                padding: const EdgeInsets.fromLTRB(22, 18, 18, 18),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        _MetaBadge(
+                          label: match.matchDateText,
+                          icon: Icons.calendar_today_rounded,
+                          backgroundColor: selected
+                              ? Colors.white.withValues(alpha: 0.16)
+                              : accentColor.withValues(alpha: 0.12),
+                          foregroundColor: selected ? Colors.white : accentColor,
+                        ),
+                        const SizedBox(width: 8),
+                        if (selected)
+                          _MetaBadge(
+                            label: 'SELECTED',
+                            icon: Icons.ads_click_rounded,
+                            backgroundColor:
+                                theme.colorScheme.secondary.withValues(alpha: 0.22),
+                            foregroundColor: Colors.white,
+                          ),
+                        const Spacer(),
+                        _ResultBadge(
+                          resultLabel: match.resultLabel,
+                          selected: selected,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                match.opponentName,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.headlineSmall?.copyWith(
+                                  color: headlineColor,
+                                  fontWeight: FontWeight.w900,
+                                  height: 1.05,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                match.opponentTeam.trim().isEmpty
+                                    ? '所属チーム未登録'
+                                    : match.opponentTeam,
+                                style: theme.textTheme.titleSmall?.copyWith(
+                                  color: sublineColor,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                match.tournamentName.trim().isEmpty
+                                    ? 'TOURNAMENT NOT SET'
+                                    : match.tournamentName.toUpperCase(),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.labelLarge?.copyWith(
+                                  color: sublineColor,
+                                  letterSpacing: 1.0,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Container(
+                          constraints: const BoxConstraints(minWidth: 104),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 14,
+                          ),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: scoreboardGradient,
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: Colors.white.withValues(
+                                alpha: selected ? 0.2 : 0.08,
+                              ),
+                            ),
+                          ),
+                          child: Column(
+                            children: [
+                              Text(
+                                '${match.mySetCount} : ${match.oppSetCount}',
+                                style: theme.textTheme.headlineMedium?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0.6,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'SET SCORE',
+                                style: theme.textTheme.labelMedium?.copyWith(
+                                  color: Colors.white.withValues(alpha: 0.74),
+                                  letterSpacing: 1.2,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _MetaBadge(
+                          label: match.playStyle,
+                          icon: Icons.sports_tennis_rounded,
+                          backgroundColor: selected
+                              ? Colors.white.withValues(alpha: 0.12)
+                              : theme.colorScheme.surfaceContainerHighest
+                                  .withValues(alpha: 0.7),
+                          foregroundColor:
+                              selected ? Colors.white : theme.colorScheme.primary,
+                        ),
+                        _MetaBadge(
+                          label: '課題 ${match.issueTags.length}件',
+                          icon: Icons.flag_rounded,
+                          backgroundColor: selected
+                              ? Colors.white.withValues(alpha: 0.12)
+                              : theme.colorScheme.surfaceContainerHighest
+                                  .withValues(alpha: 0.7),
+                          foregroundColor:
+                              selected ? Colors.white : theme.colorScheme.primary,
+                        ),
+                        _MetaBadge(
+                          label: match.displayScores.isEmpty
+                              ? '詳細スコア未登録'
+                              : match.displayScores.first,
+                          icon: Icons.scoreboard_rounded,
+                          backgroundColor: selected
+                              ? accentColor.withValues(alpha: 0.22)
+                              : accentColor.withValues(alpha: 0.14),
+                          foregroundColor: selected ? Colors.white : accentColor,
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -903,14 +1097,16 @@ class _MatchListTile extends StatelessWidget {
   }
 }
 
-class _MatchDetailCard extends StatelessWidget {
-  const _MatchDetailCard({
+class _MatchDetailSheet extends StatelessWidget {
+  const _MatchDetailSheet({
     required this.match,
+    required this.scrollController,
     required this.onEdit,
     required this.onDelete,
   });
 
   final MatchRecord match;
+  final ScrollController scrollController;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
 
@@ -918,12 +1114,25 @@ class _MatchDetailCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return ClipRRect(
+      borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+      child: Material(
+        color: theme.colorScheme.surface,
+        child: ListView(
+          controller: scrollController,
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
           children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 20),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.3),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               decoration: BoxDecoration(
@@ -990,7 +1199,7 @@ class _MatchDetailCard extends StatelessWidget {
                   ? '勝因・敗因メモなし'
                   : match.winLossReason,
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
             Row(
               children: [
                 Expanded(
@@ -1014,6 +1223,7 @@ class _MatchDetailCard extends StatelessWidget {
     );
   }
 }
+
 
 class _DetailChip extends StatelessWidget {
   const _DetailChip({
@@ -1042,31 +1252,84 @@ class _DetailChip extends StatelessWidget {
 class _ResultBadge extends StatelessWidget {
   const _ResultBadge({
     required this.resultLabel,
+    this.selected = false,
   });
 
   final String resultLabel;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isWin = resultLabel == '勝ち';
-    final backgroundColor =
-        isWin ? theme.colorScheme.primaryContainer : theme.colorScheme.errorContainer;
-    final foregroundColor =
-        isWin ? theme.colorScheme.onPrimaryContainer : theme.colorScheme.onErrorContainer;
+    final backgroundColor = selected
+        ? Colors.white.withValues(alpha: isWin ? 0.16 : 0.14)
+        : isWin
+            ? theme.colorScheme.secondary.withValues(alpha: 0.15)
+            : theme.colorScheme.tertiary.withValues(alpha: 0.14);
+    final foregroundColor = selected
+        ? Colors.white
+        : isWin
+            ? theme.colorScheme.secondary
+            : theme.colorScheme.tertiary;
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: backgroundColor,
         borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: foregroundColor.withValues(alpha: selected ? 0.22 : 0.18),
+        ),
       ),
       child: Text(
         resultLabel,
         style: TextStyle(
           color: foregroundColor,
-          fontWeight: FontWeight.w700,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.4,
         ),
+      ),
+    );
+  }
+}
+
+class _MetaBadge extends StatelessWidget {
+  const _MetaBadge({
+    required this.label,
+    required this.icon,
+    required this.backgroundColor,
+    required this.foregroundColor,
+  });
+
+  final String label;
+  final IconData icon;
+  final Color backgroundColor;
+  final Color foregroundColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: backgroundColor,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: foregroundColor),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              color: foregroundColor,
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ],
       ),
     );
   }
